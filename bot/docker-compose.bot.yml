@@ -1,0 +1,31 @@
+# ربات تلگرام — با فایل اصلی پروژه اجرا می‌شود:
+#   docker compose -f docker-compose.release.yml -f docker-compose.bot.yml up -d --build
+#
+# توکن را در فایل .env کنار compose بگذارید:
+#   TELEGRAM_BOT_TOKEN=123456:ABC-xyz
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: moneyprinterturbo-bot
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?در فایل .env مقدار TELEGRAM_BOT_TOKEN را بگذارید}
+      MPT_API_BASE: http://moneyprinterturbo-api:8080
+      MPT_API_KEY: ${MPT_API_KEY:-}
+      ALLOWED_CHAT_IDS: ${ALLOWED_CHAT_IDS:-}
+      VIDEO_SOURCE: ${VIDEO_SOURCE:-pexels}
+      VIDEO_ASPECT: ${VIDEO_ASPECT:-9:16}
+      VIDEO_VOICE: ${VIDEO_VOICE:-en-US-AriaNeural-Female}
+      VIDEO_LANGUAGE: ${VIDEO_LANGUAGE:-English}
+      VIDEO_CLIP_DURATION: ${VIDEO_CLIP_DURATION:-5}
+      BGM_VOLUME: ${BGM_VOLUME:-0.2}
+      SUBTITLE_ENABLED: ${SUBTITLE_ENABLED:-true}
+      POLL_SECONDS: ${POLL_SECONDS:-10}
+      EDIT_SECONDS: ${EDIT_SECONDS:-45}
+      MAX_WAIT_SECONDS: ${MAX_WAIT_SECONDS:-1800}
+      HTTPS_PROXY: ${HTTPS_PROXY:-}
+    restart: always
+    depends_on:
+      - api

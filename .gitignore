@@ -1,0 +1,30 @@
+# --- حذفیات از ریپازیتوری گیت‌هاب ------------------------------------------
+
+# بسته‌ی قابل حمل (۲ گیگ — روی لینوکس در deploy از upstream کلون می‌شود)
+MoneyPrinterTurbo/
+
+# کتابخانه‌های باینری پایتون/ffmpeg
+lib/
+
+# رمزها و کلیدها — هرگز کامیت نشوند
+bot/bot.env
+config.toml
+
+# خروجی‌ها و لاگ‌ها
+bot/out/
+bot/__pycache__/
+bot/sample_build.log
+*.log
+__pycache__/
+*.pyc
+
+# موضوعات تولیدشده محلی
+topics.csv
+
+# خروجی‌های ویدیویی و میان‌محصولات (در مخزن نروند)
+*.mp4
+*.raw.png
+*.raw.jpg
+bot/_last_script.txt
+bot/yt.env
+

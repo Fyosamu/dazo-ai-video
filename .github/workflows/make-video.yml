@@ -1,0 +1,162 @@
+# اتوماسیون ساخت ویدیو روی سرور لینوکس رایگان گیت‌هاب (GitHub Actions)
+#
+# دو روش اجرا:
+#   1) خودکار، هر روز ساعت ۹ صبح و ۶ عصر به وقت تهران (cron به UTC ثبت می‌شود)
+#      → موضوع تازه از بانک ۱۰هزارتایی بدون تکرار، همه‌چیز خودکار
+#   2) دستی: Actions → Run workflow → موضوع دلخواه (انگلیسی)
+#
+# خروجی هر اجرا:
+#   - Artifacts: ویدیوی باکیفیت کامل + تامنیل + همه متن‌ها (۳ روز ماندگاری)
+#   - تلگرام: پیش‌نمایش ≤۴۸MB (ربات‌ها حداکثر ۵۰MB می‌فرستند) + تامنیل + کپشن
+#
+# سهمیه: مخزن عمومی (Public) = دقیقه اجرا نامحدود و رایگان.
+# هر اجرا حداکثر ۶ ساعت (ساخت ۱۳ دقیقه‌ای حدود ۲-۴ ساعت — جا دارد).
+name: make-video
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Video topic (English) — خالی بگذارید تا خودکار از بانک موضوعات انتخاب شود"
+        required: false
+        type: string
+  schedule:
+    - cron: '30 5 * * *'    # 05:30 UTC = 09:00 به وقت تهران
+    - cron: '30 14 * * *'   # 14:30 UTC = 18:00 به وقت تهران
+
+permissions:
+  contents: write   # برای ثبت وضعیت موضوعات مصرف‌شده
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      MPT_TOPIC: ${{ inputs.topic }}
+      GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
+      PEXELS_KEY: ${{ secrets.PEXELS_KEY }}
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      MPT_PROJECT_DIR: ${{ github.workspace }}
+      MPT_OUT_DIR: ${{ github.workspace }}/out
+      PYTHONUTF8: "1"
+      FFMPEG_BINARY: /usr/bin/ffmpeg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Clone MoneyPrinterTurbo + deps
+        run: |
+          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git mpt
+          pip install -r mpt/requirements.txt
+          pip install requests pillow
+
+      - name: Configure keys (از GitHub Secrets — هرگز در کد نیستند)
+        run: |
+          cp mpt/config.example.toml mpt/config.toml
+          python - <<'PY'
+          import os, pathlib, re
+          p = pathlib.Path("mpt/config.toml"); t = p.read_text(encoding="utf-8")
+          t = re.sub(r'(?m)^pexels_api_keys = .*', f'pexels_api_keys = ["{os.environ["PEXELS_KEY"]}"]', t)
+          t = re.sub(r'(?m)^llm_provider = .*', 'llm_provider = "gemini"', t)
+          t = re.sub(r'(?m)^gemini_api_key = .*', f'gemini_api_key = "{os.environ["GEMINI_KEY"]}"', t)
+          t = re.sub(r'(?m)^gemini_model_name = .*', 'gemini_model_name = "gemini-flash-lite-latest"', t)
+          p.write_text(t, encoding="utf-8")
+          PY
+
+      - name: Patch subtitle background → 70% dark + rounded (همان کیفیت نمونه)
+        run: |
+          python - <<'PY'
+          import pathlib
+          v = pathlib.Path("mpt/app/services/video.py"); s = v.read_text(encoding="utf-8")
+          s = s.replace("alpha=140,", "alpha=178,")
+          s = s.replace("color=bg_color,\n                alpha=255,", "color=bg_color,\n                alpha=178,")
+          assert "alpha=178" in s, "patch failed"
+          v.write_text(s, encoding="utf-8")
+          print("subtitle alpha -> 178 (70%) + rounded ok")
+          PY
+
+      - name: Clear old artifacts (فضای رایگان500MB — قدیمی‌ها قبل از آپلود جدید پاک شوند)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[].id' 2>/dev/null | xargs -r -I{} \
+            gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/{}" || true
+
+      - name: Start API server
+        run: |
+          cd mpt
+          nohup python main.py > ../api.log 2>&1 &
+          cd ..
+          for i in $(seq 1 40); do
+            sleep 3
+            if curl -sf http://127.0.0.1:8080/ping > /dev/null; then echo "API up"; break; fi
+          done
+          curl -sf http://127.0.0.1:8080/ping
+
+      - name: Generate video + thumbnail + texts (خودکار: موضوع از بانک بدون تکرار)
+        run: |
+          mkdir -p out
+          cd bot
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python -u make_sample.py --daily
+          else
+            python -u make_sample.py
+          fi
+
+      - name: Make Telegram preview (≤48MB — سقف ربات تلگرام 50MB)
+        run: |
+          ffmpeg -y -i out/sample_video.mp4 \
+            -c:v libx264 -b:v 380k -preset veryfast \
+            -c:a aac -b:a 96k out/preview.mp4
+
+      - name: Upload artifacts (ویدیوی کامل باکیفیت + تامنیل + متن‌ها)
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-${{ github.run_number }}
+          path: |
+            out/sample_video.mp4
+            out/short_video.mp4
+            out/preview.mp4
+            out/thumbnail.jpg
+            out/title.txt
+            out/hook.txt
+            out/caption.txt
+            out/description.txt
+            out/script.txt
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Save used topics (ضد تکرار + جلوگیری از غیرفعال شدن cron پس از60 روز بی‌کاری)
+        run: |
+          git config user.name "mpt-bot"
+          git config user.email "mpt-bot@users.noreply.github.com"
+          mkdir -p publish
+          touch publish/used_topics.txt
+          git add -f publish/used_topics.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "daily: mark topics used"
+            git pull --rebase origin HEAD || true
+            git push || true
+          fi
+
+      - name: Send to Telegram (پیش‌نمایش + تامنیل + کپشن)
+        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
+        run: |
+          CAP=$(python -c "import pathlib; print(pathlib.Path('out/caption.txt').read_text(encoding='utf-8')[:900])")
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F video="@out/preview.mp4" \
+            -F caption="${CAP}" > /dev/null || true
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto" \
+            -F chat_id="${TELEGRAM_CHAT_ID}" \
+            -F photo="@out/thumbnail.jpg" > /dev/null || true
