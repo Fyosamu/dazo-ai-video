@@ -292,7 +292,7 @@ def main():
         "video_terms": terms,
         "video_language": "English",
         "video_source": "pexels",
-        "video_aspect": "9:16",
+        "video_aspect": "16:9",
         "voice_name": VOICE,
         "voice_rate": 0.95,   # کمی آرام‌تر → لحن نرم‌تر و طبیعی‌تر (ضد ربات‌گونه)
         "voice_volume": 1.0,
@@ -307,7 +307,7 @@ def main():
         "n_threads": 8,
     }
     print("[4] rendering …", flush=True)
-    task_id, task = submit_and_wait(payload, "FULL11-20min")
+    task_id, task = submit_and_wait(payload, "quick" if QUICK else "FULL11-20min")
     video = botlib.download_video(task_id, task, DAZO)
     final = DAZO / "sample_video.mp4"
     if final.exists():
@@ -327,6 +327,7 @@ def main():
     spayload = dict(payload)
     spayload["video_script"] = short_script
     spayload["video_terms"] = terms[:5]
+    spayload["video_aspect"] = "9:16"
     stask_id, stask = submit_and_wait(spayload, "SHORT")
     svid = botlib.download_video(stask_id, stask, DAZO, intro=False)
     sfinal = DAZO / "short_video.mp4"

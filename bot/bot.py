@@ -303,6 +303,15 @@ def polish_video(path: Path, intro: bool = True, delay_ms: int = 1100) -> Path:
         return path
     ffmpeg = CFG.get("FFMPEG") or "ffmpeg"
     tmp = path.with_suffix(".polished.mp4")
+    # اندازه/نرخ واقعی ویدیو (لانگ 16:9 یا شورت 9:16) تا بلوک سیاه درست برش خورد
+    info = _sp.run(
+        [ffmpeg, "-hide_banner", "-i", str(path)],
+        capture_output=True, text=True, errors="replace",
+    ).stderr or ""
+    m = re.search(r"(\d{2,5})x(\d{2,5})", info)
+    size = f"{m.group(1)}x{m.group(2)}" if m else "1920x1080"
+    mf = re.search(r"([\d.]+) fps", info)
+    fps = mf.group(1) if mf else "30"
     fc = (
         "[1:v]format=yuv420p[vb];"
         "[0:v]fade=t=in:st=0:d=1.4,format=yuv420p[vr];"
@@ -313,7 +322,7 @@ def polish_video(path: Path, intro: bool = True, delay_ms: int = 1100) -> Path:
         [ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
          "-i", str(path),
          "-f", "lavfi", "-t", "0.8",
-         "-i", "color=c=black:s=1080x1920:d=0.8:r=30",
+         "-i", f"color=c=black:s={size}:d=0.8:r={fps}",
          "-filter_complex", fc,
          "-map", "[v]", "-map", "[a]",
          "-c:v", "libx264", "-crf", "18", "-preset", "veryfast",
@@ -390,6 +399,18 @@ def mpt_social(subject: str, script: str = "") -> dict:
         timeout=180,
     )
     return _checked(r)["data"]
+
+
+def _pick_font(size: int, candidates):
+    """اولین فونت قابل استفاده از میان گزینه‌ها (ویندوز: Impact — لینوکس گیت‌هاب: Anton)."""
+    from PIL import ImageFont
+
+    for path in candidates:
+        try:
+            return ImageFont.truetype(str(path), size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
 
 
 def make_thumbnail(topic: str, text: str, dest: Path) -> Path:
@@ -486,31 +507,30 @@ def make_thumbnail(topic: str, text: str, dest: Path) -> Path:
     mask = shade.resize((W, H))
     img = Image.composite(Image.new("RGB", (W, H), (8, 8, 12)), img, mask)
     draw = ImageDraw.Draw(img)
-    font_small = ImageFont.truetype("C:/Windows/Fonts/arialbd.ttf", 24)
+    font_big = _pick_font(
+        94,
+        (
+            "C:/Windows/Fonts/impact.ttf",
+            HERE / "fonts" / "Anton-Regular.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+        ),
+    )
+    font_small = _pick_font(
+        24,
+        (
+            "C:/Windows/Fonts/arialbd.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            HERE / "fonts" / "Anton-Regular.ttf",
+        ),
+    )
     lines = textwrap.wrap(text.upper(), width=22)[:3]
-    # متن اصلی برجسته: بزرگ‌ترین سایزی که در عرض جا شود + خط مشکی کلفت دور حروف
-    font_big = None
-    stroke = 4
-    for big in range(112, 47, -4):
-        f = ImageFont.truetype("C:/Windows/Fonts/impact.ttf", big)
-        sw = max(4, big // 16)
-        if all(
-            draw.textbbox((0, 0), ln, font=f, stroke_width=sw)[2] <= W - 72
-            for ln in lines
-        ):
-            font_big, stroke = f, sw
-            break
-    if font_big is None:
-        font_big = ImageFont.truetype("C:/Windows/Fonts/impact.ttf", 48)
-    y = H - (font_big.size + 16) * len(lines) - 46
+    y = H - 96 * len(lines) - 44
     for line in lines:
-        box = draw.textbbox((0, 0), line, font=font_big, stroke_width=stroke)
+        box = draw.textbbox((0, 0), line, font=font_big)
         x = (W - (box[2] - box[0])) // 2
-        draw.text(
-            (x, y), line, font=font_big, fill=(255, 214, 10),
-            stroke_width=stroke, stroke_fill=(0, 0, 0),
-        )
-        y += font_big.size + 16
+        draw.text((x + 3, y + 3), line, font=font_big, fill=(0, 0, 0))
+        draw.text((x, y), line, font=font_big, fill=(255, 214, 10))
+        y += 96
     tag = "THE SCIENCE OF YOU"
     box = draw.textbbox((0, 0), tag, font=font_small)
     draw.text(((W - (box[2] - box[0])) // 2, H - 40), tag, font=font_small, fill=(255, 255, 255))

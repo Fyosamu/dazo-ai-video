@@ -1,4 +1,4 @@
-# اتوماسیون ساخت ویدیو روی سرور لینوکس رایگان گیت‌هاب (GitHub Actions)
+# اتوماسیون ساخت و آپلود ویدیو روی سرور لینوکس رایگان گیت‌هاب (GitHub Actions)
 #
 # دو روش اجرا:
 #   1) خودکار، هر روز ساعت ۹ صبح و ۶ عصر به وقت تهران (cron به UTC ثبت می‌شود)
@@ -6,11 +6,11 @@
 #   2) دستی: Actions → Run workflow → موضوع دلخواه (انگلیسی)
 #
 # خروجی هر اجرا:
-#   - Artifacts: ویدیوی باکیفیت کامل + تامنیل + همه متن‌ها (۳ روز ماندگاری)
-#   - تلگرام: پیش‌نمایش ≤۴۸MB (ربات‌ها حداکثر ۵۰MB می‌فرستند) + تامنیل + کپشن
+#   - آپلود خودکار در یوتیوب: ویدیوی اصلی ۱۶:۹ + شورت ۹:۱۶ (اگر Secrets اتصال موجود باشد)
+#   - Artifacts: ویدیو + شورت + تامنیل + همه متن‌ها (۳ روز ماندگاری)
 #
 # سهمیه: مخزن عمومی (Public) = دقیقه اجرا نامحدود و رایگان.
-# هر اجرا حداکثر ۶ ساعت (ساخت ۱۳ دقیقه‌ای حدود ۲-۴ ساعت — جا دارد).
+# هر اجرا حداکثر ۶ ساعت (ساخت ۱۱-۲۰ دقیقه‌ای حدود ۲-۴ ساعت — جا دارد).
 name: make-video
 
 on:
@@ -35,8 +35,9 @@ jobs:
       MPT_TOPIC: ${{ inputs.topic }}
       GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
       PEXELS_KEY: ${{ secrets.PEXELS_KEY }}
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
       MPT_PROJECT_DIR: ${{ github.workspace }}
       MPT_OUT_DIR: ${{ github.workspace }}/out
       PYTHONUTF8: "1"
@@ -57,7 +58,7 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git mpt
           pip install -r mpt/requirements.txt
-          pip install requests pillow
+          pip install requests pillow google-api-python-client google-auth-oauthlib
 
       - name: Configure keys (از GitHub Secrets — هرگز در کد نیستند)
         run: |
@@ -84,7 +85,7 @@ jobs:
           print("subtitle alpha -> 178 (70%) + rounded ok")
           PY
 
-      - name: Clear old artifacts (فضای رایگان500MB — قدیمی‌ها قبل از آپلود جدید پاک شوند)
+      - name: Clear old artifacts (فضای رایگان 500MB — قدیمی‌ها قبل از آپلود جدید پاک شوند)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -103,7 +104,7 @@ jobs:
           done
           curl -sf http://127.0.0.1:8080/ping
 
-      - name: Generate video + thumbnail + texts (خودکار: موضوع از بانک بدون تکرار)
+      - name: Generate video + thumbnail + texts (اصلی ۱۶:۹ + شورت ۹:۱۶ — خودکار)
         run: |
           mkdir -p out
           cd bot
@@ -113,20 +114,13 @@ jobs:
             python -u make_sample.py
           fi
 
-      - name: Make Telegram preview (≤48MB — سقف ربات تلگرام 50MB)
-        run: |
-          ffmpeg -y -i out/sample_video.mp4 \
-            -c:v libx264 -b:v 380k -preset veryfast \
-            -c:a aac -b:a 96k out/preview.mp4
-
-      - name: Upload artifacts (ویدیوی کامل باکیفیت + تامنیل + متن‌ها)
+      - name: Upload artifacts (ویدیوی کامل + شورت + تامنیل + متن‌ها)
         uses: actions/upload-artifact@v4
         with:
           name: video-${{ github.run_number }}
           path: |
             out/sample_video.mp4
             out/short_video.mp4
-            out/preview.mp4
             out/thumbnail.jpg
             out/title.txt
             out/hook.txt
@@ -136,7 +130,7 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
-      - name: Save used topics (ضد تکرار + جلوگیری از غیرفعال شدن cron پس از60 روز بی‌کاری)
+      - name: Save used topics (ضد تکرار + جلوگیری از غیرفعال شدن cron پس از 60 روز بی‌کاری)
         run: |
           git config user.name "mpt-bot"
           git config user.email "mpt-bot@users.noreply.github.com"
@@ -149,14 +143,21 @@ jobs:
             git push || true
           fi
 
-      - name: Send to Telegram (پیش‌نمایش + تامنیل + کپشن)
-        if: ${{ env.TELEGRAM_BOT_TOKEN != '' && env.TELEGRAM_CHAT_ID != '' }}
+      - name: YouTube upload (آپلود خودکار اصلی + شورت — فقط اگر اتصال فعال باشد)
         run: |
-          CAP=$(python -c "import pathlib; print(pathlib.Path('out/caption.txt').read_text(encoding='utf-8')[:900])")
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendVideo" \
-            -F chat_id="${TELEGRAM_CHAT_ID}" \
-            -F video="@out/preview.mp4" \
-            -F caption="${CAP}" > /dev/null || true
-          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendPhoto" \
-            -F chat_id="${TELEGRAM_CHAT_ID}" \
-            -F photo="@out/thumbnail.jpg" > /dev/null || true
+          if [ -z "$YT_REFRESH_TOKEN" ]; then
+            echo "اتصال یوتیوب هنوز ساخته نشده — رد شد."
+            exit 0
+          fi
+          if [ ! -f out/sample_video.mp4 ]; then
+            echo "ویدیویی ساخته نشد."
+            exit 1
+          fi
+          printf 'YT_CLIENT_ID=%s\nYT_CLIENT_SECRET=%s\nYT_REFRESH_TOKEN=%s\n' \
+            "$YT_CLIENT_ID" "$YT_CLIENT_SECRET" "$YT_REFRESH_TOKEN" > bot/yt.env
+          TITLE="$(head -n1 out/title.txt)"
+          TAGS=$(python -c "import re,pathlib;print(','.join(re.findall(r'#(\w+)',pathlib.Path('out/caption.txt').read_text(encoding='utf-8')))[:500])")
+          python -u bot/yt_upload.py out/sample_video.mp4 "$TITLE" out/description.txt "$TAGS" out/thumbnail.jpg
+          if [ -f out/short_video.mp4 ]; then
+            python -u bot/yt_upload.py out/short_video.mp4 "$TITLE #Shorts" out/description.txt "$TAGS"
+          fi
