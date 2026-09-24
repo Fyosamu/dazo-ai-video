@@ -7,7 +7,7 @@
 #
 # خروجی هر اجرا:
 #   - آپلود خودکار در یوتیوب: ویدیوی اصلی ۱۶:۹ + شورت ۹:۱۶ (اگر Secrets اتصال موجود باشد)
-#   - Artifacts: ویدیو + شورت + تامنیل + همه متن‌ها (۳ روز ماندگاری)
+#   - Artifacts: ویدیو + شورت + تامنیل + همه متن‌ها (۳ روز ماندگاری، فقط فضای گیت‌هاب)
 #
 # سهمیه: مخزن عمومی (Public) = دقیقه اجرا نامحدود و رایگان.
 # هر اجرا حداکثر ۶ ساعت (ساخت ۱۱-۲۰ دقیقه‌ای حدود ۲-۴ ساعت — جا دارد).
@@ -30,7 +30,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 360
     env:
       MPT_TOPIC: ${{ inputs.topic }}
       GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
@@ -54,9 +54,9 @@ jobs:
       - name: Install ffmpeg
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
-      - name: Clone MoneyPrinterTurbo + deps
+      - name: Clone MoneyPrinterTurbo v1.3.7 + deps
         run: |
-          git clone --depth 1 https://github.com/harry0703/MoneyPrinterTurbo.git mpt
+          git clone --depth 1 --branch v1.3.7 https://github.com/harry0703/MoneyPrinterTurbo.git mpt
           pip install -r mpt/requirements.txt
           pip install requests pillow google-api-python-client google-auth-oauthlib
 
@@ -114,7 +114,59 @@ jobs:
             python -u make_sample.py
           fi
 
-      - name: Upload artifacts (ویدیوی کامل + شورت + تامنیل + متن‌ها)
+      - name: YouTube upload (آپلود خودکار اصلی + شورت — فقط اگر اتصال فعال باشد)
+        id: yt
+        continue-on-error: true
+        run: |
+          if [ -z "$YT_REFRESH_TOKEN" ]; then
+            echo "اتصال یوتیوب هنوز ساخته نشده — رد شد."
+            exit 0
+          fi
+          if [ ! -f out/sample_video.mp4 ]; then
+            echo "ویدیویی ساخته نشد."
+            exit 1
+          fi
+          printf 'YT_CLIENT_ID=%s\nYT_CLIENT_SECRET=%s\nYT_REFRESH_TOKEN=%s\n' \
+            "$YT_CLIENT_ID" "$YT_CLIENT_SECRET" "$YT_REFRESH_TOKEN" > bot/yt.env
+          TITLE="$(head -n1 out/title.txt)"
+          TAGS=$(python -c "import re,pathlib;print(','.join(re.findall(r'#(\w+)',pathlib.Path('out/caption.txt').read_text(encoding='utf-8')))[:500])")
+          python -u bot/yt_upload.py out/sample_video.mp4 "$TITLE" out/description.txt "$TAGS" out/thumbnail.jpg
+          if [ -f out/short_video.mp4 ]; then
+            python -u bot/yt_upload.py out/short_video.mp4 "$TITLE #Shorts" out/description.txt "$TAGS"
+          fi
+          echo "done=1" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare artifacts (اگر آپلود شد ویدیوها حذف، وگرنه سایزشان برای فضای 500MB محدود می‌شود)
+        if: always()
+        env:
+          YT_DONE: ${{ steps.yt.outputs.done }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess
+          out = pathlib.Path("out")
+          yt_ok = os.environ.get("YT_DONE") == "1"
+          CAPS = {"sample_video.mp4": 370, "short_video.mp4": 80}   # MB
+          if yt_ok:
+              for n in ("sample_video.mp4", "short_video.mp4"):
+                  (out / n).unlink(missing_ok=True)
+                  print("yt uploaded -> dropped", n)
+          for n, mb in CAPS.items():
+              p = out / n
+              if not p.exists() or p.stat().st_size <= mb * 1048576:
+                  continue
+              r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(p)], capture_output=True, text=True)
+              dur = float((r.stdout or "60").strip() or 60)
+              kbps = max(300, int(mb * 1048576 * 8 * 0.92 / dur / 1000) - 128)
+              tmp = p.with_suffix(".cap.mp4")
+              subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(p),
+                              "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{kbps}k",
+                              "-maxrate", f"{kbps}k", "-bufsize", f"{kbps*2}k",
+                              "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(tmp)], check=True)
+              tmp.replace(p)
+              print(f"capped {n} -> {p.stat().st_size / 1048576:.0f}MB")
+          PY
+
+      - name: Upload artifacts (ویدیو + شورت + تامنیل + متن‌ها)
         uses: actions/upload-artifact@v4
         with:
           name: video-${{ github.run_number }}
@@ -143,21 +195,8 @@ jobs:
             git push || true
           fi
 
-      - name: YouTube upload (آپلود خودکار اصلی + شورت — فقط اگر اتصال فعال باشد)
+      - name: نتیجه آپلود یوتیوب (اگر اتصال فعال ولی ناموفق بود، اجرا خطا دهد)
+        if: steps.yt.outcome == 'failure'
         run: |
-          if [ -z "$YT_REFRESH_TOKEN" ]; then
-            echo "اتصال یوتیوب هنوز ساخته نشده — رد شد."
-            exit 0
-          fi
-          if [ ! -f out/sample_video.mp4 ]; then
-            echo "ویدیویی ساخته نشد."
-            exit 1
-          fi
-          printf 'YT_CLIENT_ID=%s\nYT_CLIENT_SECRET=%s\nYT_REFRESH_TOKEN=%s\n' \
-            "$YT_CLIENT_ID" "$YT_CLIENT_SECRET" "$YT_REFRESH_TOKEN" > bot/yt.env
-          TITLE="$(head -n1 out/title.txt)"
-          TAGS=$(python -c "import re,pathlib;print(','.join(re.findall(r'#(\w+)',pathlib.Path('out/caption.txt').read_text(encoding='utf-8')))[:500])")
-          python -u bot/yt_upload.py out/sample_video.mp4 "$TITLE" out/description.txt "$TAGS" out/thumbnail.jpg
-          if [ -f out/short_video.mp4 ]; then
-            python -u bot/yt_upload.py out/short_video.mp4 "$TITLE #Shorts" out/description.txt "$TAGS"
-          fi
+          echo "آپلود یوتیوب ناموفق بود — Secrets های YT_* را بررسی کنید."
+          exit 1
