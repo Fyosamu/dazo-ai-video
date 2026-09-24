@@ -1,13 +1,16 @@
 # اتوماسیون ساخت و آپلود ویدیو روی سرور لینوکس رایگان گیت‌هاب (GitHub Actions)
 #
-# دو روش اجرا:
-#   1) خودکار، هر روز ساعت ۹ صبح و ۶ عصر به وقت تهران (cron به UTC ثبت می‌شود)
+# روش اجرا:
+#   1) خودکار، هر روز یک ویدیو در بازه ۹ صبح تا ۶ عصر به وقت تهران — ساعت اجرا
+#      بین سه اسلات رندوم انتخاب می‌شود (۰۹:۰۰ / ۱۳:۰۰ / ۱۷:۰۰ تهران = ۰۵/۰۹/۱۳ UTC)
+#      اگر اسلات انتخابی اجرا نشد، اسلات بعدی همان روز جایگزین می‌شود (بدون از دست رفتن روز)
 #      → موضوع تازه از بانک ۱۰هزارتایی بدون تکرار، همه‌چیز خودکار
 #   2) دستی: Actions → Run workflow → موضوع دلخواه (انگلیسی)
 #
 # خروجی هر اجرا:
 #   - آپلود خودکار در یوتیوب: ویدیوی اصلی ۱۶:۹ + شورت ۹:۱۶ (اگر Secrets اتصال موجود باشد)
-#   - Artifacts: ویدیو + شورت + تامنیل + همه متن‌ها (۳ روز ماندگاری، فقط فضای گیت‌هاب)
+#   - فیلتر کیفیت قبل از آپلود: ویدیوی کوتاه/خراب هرگز منتشر نمی‌شود
+#   - Artifacts: ویدیو + شورت + تامنیل + همه متن‌ها + api.log هنگام خطا
 #
 # سهمیه: مخزن عمومی (Public) = دقیقه اجرا نامحدود و رایگان.
 # هر اجرا حداکثر ۶ ساعت (ساخت ۱۱-۲۰ دقیقه‌ای حدود ۲-۴ ساعت — جا دارد).
@@ -21,8 +24,9 @@ on:
         required: false
         type: string
   schedule:
-    - cron: '30 5 * * *'    # 05:30 UTC = 09:00 به وقت تهران
-    - cron: '30 14 * * *'   # 14:30 UTC = 18:00 به وقت تهران
+    - cron: '0 5 * * *'     # 05:00 UTC = 09:00 به وقت تهران (اسلات ۰)
+    - cron: '0 9 * * *'     # 09:00 UTC = 13:00 به وقت تهران (اسلات ۱)
+    - cron: '0 13 * * *'    # 13:00 UTC = 17:00 به وقت تهران (اسلات ۲)
 
 permissions:
   contents: write   # برای ثبت وضعیت موضوعات مصرف‌شده
@@ -70,10 +74,39 @@ jobs:
           t = re.sub(r'(?m)^llm_provider = .*', 'llm_provider = "gemini"', t)
           t = re.sub(r'(?m)^gemini_api_key = .*', f'gemini_api_key = "{os.environ["GEMINI_KEY"]}"', t)
           t = re.sub(r'(?m)^gemini_model_name = .*', 'gemini_model_name = "gemini-flash-lite-latest"', t)
+          # رفع خطای TTS روی رانر: تایم‌اوت edge-tts پیش‌فرض ۳۰ ثانیه برای شبکه گیت‌هاب کم است
+          if re.search(r'(?m)^edge_tts_timeout = ', t):
+              t = re.sub(r'(?m)^edge_tts_timeout = .*', 'edge_tts_timeout = 120', t)
+          else:
+              t += "\nedge_tts_timeout = 120\n"
           p.write_text(t, encoding="utf-8")
           PY
 
+      - name: Slot check (فقط یک ویدیو در روز — اسلات رندوم بین ۹ صبح تا ۶ عصر تهران)
+        id: slot
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "schedule" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          mkdir -p publish; touch publish/last_upload.txt
+          TODAY=$(date -u +%F)
+          if [ "$(cat publish/last_upload.txt)" = "$TODAY" ]; then
+            echo "امروز آپلود شد — رد شد."; echo "run=0" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          CHOSEN=$(python -c "import hashlib,datetime;print(int(hashlib.sha256(datetime.date.today().toordinal().to_bytes(4,'big')).hexdigest(),16)%3)")
+          HOUR=$(date -u +%-H)
+          if   [ "$HOUR" -le 5 ]; then CUR=0
+          elif [ "$HOUR" -le 9 ]; then CUR=1
+          else CUR=2; fi          if [ "$CUR" -ge "$CHOSEN" ]; then
+            echo "slot $CUR (chosen $CHOSEN) → run"
+            echo "run=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "slot $CUR قبل از اسلات $CHOSEN — رد شد"
+            echo "run=0" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Patch subtitle background → 70% dark + rounded (همان کیفیت نمونه)
+        if: steps.slot.outputs.run == '1'
         run: |
           python - <<'PY'
           import pathlib
@@ -86,6 +119,7 @@ jobs:
           PY
 
       - name: Clear old artifacts (فضای رایگان 500MB — قدیمی‌ها قبل از آپلود جدید پاک شوند)
+        if: steps.slot.outputs.run == '1'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -94,6 +128,7 @@ jobs:
             gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/{}" || true
 
       - name: Start API server
+        if: steps.slot.outputs.run == '1'
         run: |
           cd mpt
           nohup python main.py > ../api.log 2>&1 &
@@ -105,6 +140,7 @@ jobs:
           curl -sf http://127.0.0.1:8080/ping
 
       - name: Generate video + thumbnail + texts (اصلی ۱۶:۹ + شورت ۹:۱۶ — خودکار)
+        if: steps.slot.outputs.run == '1'
         run: |
           mkdir -p out
           cd bot
@@ -114,8 +150,27 @@ jobs:
             python -u make_sample.py
           fi
 
+      - name: Quality gate (ویدیوی کوتاه/خراب آپلود نمی‌شود)
+        id: gate
+        if: steps.slot.outputs.run == '1'
+        run: |
+          ok=1
+          if [ ! -f out/sample_video.mp4 ]; then echo "ویدیوی اصلی نیست"; ok=0; fi
+          DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/sample_video.mp4 2>/dev/null || echo 0)
+          echo "مدت اصلی: ${DUR}s"
+          # اصلی باید حداقل ۹ دقیقه باشد (بلند ۱۱-۲۰ دقیقه‌ای — زیر ۹ دقیقه یعنی رندر ناقص)
+          python -c "import sys;sys.exit(0 if float('${DUR:-0}')>=540 else 1)" || { echo "کوتاه‌تر از حد نصاب"; ok=0; }
+          if [ -f out/thumbnail.jpg ]; then
+            SDUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/short_video.mp4 2>/dev/null || echo 0)
+            echo "مدت شورت: ${SDUR}s"
+            python -c "import sys;sys.exit(0 if float('${SDUR:-0}')>=25 else 1)" || { echo "شورت ناقص"; ok=0; }
+          fi
+          echo "pass=$ok" >> "$GITHUB_OUTPUT"
+          [ "$ok" = "1" ] && echo "کیفیت تأیید شد" || echo "::warning::فیلتر کیفیت رد کرد — آپلود انجام نمی‌شود"
+
       - name: YouTube upload (آپلود خودکار اصلی + شورت — فقط اگر اتصال فعال باشد)
         id: yt
+        if: steps.slot.outputs.run == '1' && steps.gate.outputs.pass == '1'
         continue-on-error: true
         run: |
           if [ -z "$YT_REFRESH_TOKEN" ]; then
@@ -137,7 +192,7 @@ jobs:
           echo "done=1" >> "$GITHUB_OUTPUT"
 
       - name: Prepare artifacts (اگر آپلود شد ویدیوها حذف، وگرنه سایزشان برای فضای 500MB محدود می‌شود)
-        if: always()
+        if: always() && steps.slot.outputs.run == '1'
         env:
           YT_DONE: ${{ steps.yt.outputs.done }}
         run: |
@@ -167,6 +222,7 @@ jobs:
           PY
 
       - name: Upload artifacts (ویدیو + شورت + تامنیل + متن‌ها)
+        if: steps.slot.outputs.run == '1'
         uses: actions/upload-artifact@v4
         with:
           name: video-${{ github.run_number }}
@@ -182,13 +238,26 @@ jobs:
           retention-days: 3
           if-no-files-found: error
 
+      - name: Upload api.log (فقط هنگام خطا — برای عیب‌یابی)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-log-${{ github.run_number }}
+          path: api.log
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Save used topics (ضد تکرار + جلوگیری از غیرفعال شدن cron پس از 60 روز بی‌کاری)
+        if: always()
         run: |
           git config user.name "mpt-bot"
           git config user.email "mpt-bot@users.noreply.github.com"
           mkdir -p publish
           touch publish/used_topics.txt
-          git add -f publish/used_topics.txt
+          if [ "${{ steps.yt.outputs.done }}" = "1" ] || [ "${{ steps.gate.outputs.pass }}" = "1" ]; then
+            date -u +%F > publish/last_upload.txt
+          fi
+          git add -f publish/used_topics.txt publish/last_upload.txt
           if ! git diff --cached --quiet; then
             git commit -m "daily: mark topics used"
             git pull --rebase origin HEAD || true

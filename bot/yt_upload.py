@@ -36,6 +36,9 @@ video = sys.argv[1]
 title = sys.argv[2][:100]
 desc_file = Path(sys.argv[3]) if len(sys.argv) > 3 else None
 desc = desc_file.read_text(encoding="utf-8")[:4900] if desc_file else ""
+# خط افشای AI (کوتاه، آخر توضیحات — تکلیف YouTube برای محتوای ساختگی)
+if desc and "AI assistance" not in desc:
+    desc = desc.rstrip() + "\n\nMade with AI assistance."
 tags = (
     [t.strip() for t in sys.argv[4].split(",") if t.strip()]
     if len(sys.argv) > 4 and sys.argv[4]
@@ -50,7 +53,12 @@ body = {
         "tags": tags,
         "categoryId": "27",  # Science & Technology
     },
-    "status": {"privacyStatus": "public", "selfDeclaredMadeForKids": False},
+    "status": {
+        "privacyStatus": "public",
+        "selfDeclaredMadeForKids": False,
+        # افشای رسمی محتوای ساختگی/ساخته‌شده با AI — تکلیف یوتیوب؛ متن جلوی بیننده نمی‌آید
+        "containsSyntheticMedia": True,
+    },
 }
 media = MediaFileUpload(video, chunksize=-1, resumable=True, mimetype="video/*")
 req = yt.videos().insert(part="snippet,status", body=body, media_body=media)

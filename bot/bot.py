@@ -500,15 +500,20 @@ def make_thumbnail(topic: str, text: str, dest: Path) -> Path:
         nh = int(w / target)
         img = img.crop((0, (h - nh) // 2, w, (h - nh) // 2 + nh))
     img = img.resize((W, H), Image.LANCZOS)
+    style = hash(str(dest)) % 3  # ۳ استایل چرخشی — تنوع تامنیل‌ها (ضد الگوی ثابت)
+    if style == 2:  # سیاه‌وسفید کلاسیک
+        img = img.convert("L").convert("RGB")
     # سایه‌ی پایین برای خوانایی متن
     shade = Image.new("L", (1, H))
+    top = 0.4 if style != 1 else 0.15
     for y in range(H):
-        shade.putpixel((0, y), int(max(0, (y - H * 0.4) / (H * 0.6)) * 180))
+        shade.putpixel((0, y), int(max(0, (y - H * top) / (H * (1 - top))) * 180))
     mask = shade.resize((W, H))
     img = Image.composite(Image.new("RGB", (W, H), (8, 8, 12)), img, mask)
     draw = ImageDraw.Draw(img)
+    big_size = (94, 82, 108)[style]
     font_big = _pick_font(
-        94,
+        big_size,
         (
             "C:/Windows/Fonts/impact.ttf",
             HERE / "fonts" / "Anton-Regular.ttf",
@@ -523,17 +528,26 @@ def make_thumbnail(topic: str, text: str, dest: Path) -> Path:
             HERE / "fonts" / "Anton-Regular.ttf",
         ),
     )
-    lines = textwrap.wrap(text.upper(), width=22)[:3]
-    y = H - 96 * len(lines) - 44
+    width = (22, 26, 18)[style]
+    lines = textwrap.wrap(text.upper(), width=width)[:3]
+    step = big_size + 6
+    # استایل۰: پایین/زرد — استایل۱: بالا/سفید — استایل۲: وسط/زرد
+    y = (H - step * len(lines) - 44) if style == 0 else (40 if style == 1 else (H - step * len(lines)) // 2)
+    main = (255, 214, 10) if style != 1 else (255, 255, 255)
     for line in lines:
         box = draw.textbbox((0, 0), line, font=font_big)
         x = (W - (box[2] - box[0])) // 2
         draw.text((x + 3, y + 3), line, font=font_big, fill=(0, 0, 0))
-        draw.text((x, y), line, font=font_big, fill=(255, 214, 10))
-        y += 96
+        draw.text((x, y), line, font=font_big, fill=main)
+        y += step
     tag = "THE SCIENCE OF YOU"
     box = draw.textbbox((0, 0), tag, font=font_small)
-    draw.text(((W - (box[2] - box[0])) // 2, H - 40), tag, font=font_small, fill=(255, 255, 255))
+    draw.text(
+        ((W - (box[2] - box[0])) // 2, H - 40),
+        tag,
+        font=font_small,
+        fill=(255, 214, 10) if style == 2 else (255, 255, 255),
+    )
     img.save(dest, "JPEG", quality=93)
     raw.unlink(missing_ok=True)
     return dest

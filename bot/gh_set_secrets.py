@@ -38,7 +38,7 @@ def main() -> None:
     if len(args) % 2:
         raise SystemExit("usage: gh_set_secrets.py NAME VALUE ...")
     for name, value in zip(args[0::2], args[1::2]):
-        pub = req("GET", f"/repos/{REPO}/actions/secrets/public")
+        pub = req("GET", f"/repos/{REPO}/actions/secrets/public-key")
         box = nacl.public.SealedBox(
             nacl.public.PublicKey(base64.b64decode(pub["key"]))
         )

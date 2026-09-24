@@ -40,6 +40,24 @@ GEMINI_URL = (
     "gemini-flash-lite-latest:generateContent"
 )
 VOICE = "en-US-EmmaMultilingualNeural-Female"  # Emma: گرم‌تر و نرم‌تر از Ava
+
+# فیلتر موضوعات حساس (سیاست مانیتایز: پول/سلامت/حقوقی → خطر رد شدن از بررسی انسانی)
+SENSITIVE = (
+    "invest", "stock", "crypto", "money", "rich", "wealth", "income", "earn",
+    "trading", "forex", "debt", "loan", "tax", "credit",
+    "cure", "disease", "cancer", "weight loss", "diet pill", "supplement",
+    "medical", "doctor", "symptom", "treatment", "drug", "vaccine",
+    "lawyer", "lawsuit", "legal", "court", "sue", "attorney",
+)
+
+# ۴ قالب داستانی (چرخشی — ضد سیاست محتوای تکراری/قالبی)
+FRAMES = [
+    "Structure: cold-open with a shocking fact, then 'the setup / the twist / what it means for you', ending on an open question.",
+    "Structure: start as a mystery ('nobody can explain X'), peel back three layers of evidence, then reveal the uncomfortable implication.",
+    "Structure: begin with a tiny everyday moment, zoom out to the big scientific picture, then zoom back in with a practical 'so what'.",
+    "Structure: open with two contrasting stories side by side, converge on the one mechanism behind both, close with a mirror held to the viewer.",
+]
+
 TOPIC = os.environ.get("MPT_TOPIC") or (
     "Why humans really get angry — the three-billion-year-old switch inside us: "
     "single cells that first learned war, the amygdala hijack, modern life "
@@ -92,24 +110,27 @@ def gemini_json(prompt: str, max_tokens: int = 2048) -> dict:
 
 
 def build_script() -> str:
+    import random
+    frame = random.choice(FRAMES)
+    lo, hi = random.choice([(1650, 2000), (2400, 2850)])  # چرخش طول: ~۱۲ یا ~۱۸ دقیقه
     prompt = f"""Write the full narration script for a YouTube science video.
 TOPIC: {TOPIC}
 REQUIREMENTS:
-- Length: between1600 and2900 words (11 to20 minutes spoken at ~145 words/minute).
-  Judge by the topic itself: if it is shallow, stay around1600-1900; if deep and rich,
-  go all the way to2900. Never below1600, never above2900.
+- Length: between{lo} and{hi} words (spoken at ~145 words/minute).
+  Never below{lo}, never above{hi}.
+- {frame}
 - Everything in English, spoken style, natural and captivating, for adults.
 - Open with a strong curiosity hook that repeats the topic/title in the first sentence.
 - Then break it into clear sections flowing naturally (no section labels, no markdown, no timestamps).
 - NATURAL PAUSES: insert a blank line between sections, and occasionally before a revelation
   or after a surprising fact (about one blank line every3-5 sentences, NEVER on every sentence).
   Blank lines become natural ~1 second breathing pauses in the voice.
-- Science + personality/psychology angle, concrete examples, small surprises, "why" and "how" answered to the root.
+- Concrete examples, small surprises, "why" and "how" answered to the root.
 - End with a thought-provoking closing line and a soft subscribe ask.
 - Output ONLY the narration text, plain, no headings, no asterisks."""
     script = gemini(prompt, max_tokens=8192)
     words = len(script.split())
-    print(f"[script] {words} words (~{words/145:.1f} min)", flush=True)
+    print(f"[script] {words} words (~{words/145:.1f} min) frame={FRAMES.index(frame)}", flush=True)
     return script
 
 
@@ -127,12 +148,28 @@ def build_terms() -> list:
     return terms
 
 
+TITLE_STYLES = (
+    'curiosity hook, NO numbers',            # سبک۱: کنجکاوی خالص
+    'start with a number or question',       # سبک۲: عدد/سؤال
+    'short punchy ≤40 chars, ALL CAPS words',  # سبک۳: کوتاه و ضربتی
+)
+
+DESC_TEMPLATES = (
+    'strong first line, then "IN THIS VIDEO:" with5-7 section bullets derived from the script, then a closing line',
+    'strong first line as a question, a short paragraph of context, then5-7 bullet takeaways, then a soft subscribe line',
+    'one-sentence hook, then numbered facts from the script (7-9 lines), then "WATCH NEXT:" style closing line',
+)
+
+
 def build_metadata(script: str) -> dict:
+    import random
+    style = random.choice(TITLE_STYLES)
+    dtpl = random.choice(DESC_TEMPLATES)
     prompt = f"""For a YouTube video, return STRICT JSON with keys:
-"title" (<=70 chars, curiosity hook, no quotes inside),
-"hook" (<=6 words, punchy, UPPERCASE-able, for thumbnail overlay),
+"title" (≤70 chars, {style}, no quotes inside),
+"hook" (≤6 words, punchy, UPPERCASE-able, for thumbnail overlay),
 "caption" (3-4 sentences, curiosity-provoking, makes someone say "oh really?", English),
-"description" (YouTube description: strong first line, then "IN THIS VIDEO:" with5-7 section bullets derived from the script, then a closing line),
+"description" (YouTube description: {dtpl}),
 "hashtags" (array of7 strings WITHOUT the # sign, relevant to psychology/science of anger).
 TOPIC: {TOPIC}
 SCRIPT:\n{script[:6000]}"""
@@ -163,17 +200,19 @@ def wait_task(task_id: str, timeout=21600):
 
 
 def submit_and_wait(payload: dict, label: str, timeout: int = 21600):
-    """ثبت تسک + پایش با تکرار خودکار روی خطاهای گذرای TTS."""
-    for attempt in range(3):
+    """ثبت تسک + پایش با تکرار خودکار روی خطاهای گذرای TTS (۵ تلاش، انتظار فزاینده)."""
+    attempts = 5
+    for attempt in range(attempts):
         r = requests.post(f"{MPT}/api/v1/videos", json=payload, headers=HEADERS, timeout=60)
         task_id = botlib._checked(r)["data"]["task_id"]
-        print(f"[submit {label}] {task_id} (attempt {attempt + 1}/3)", flush=True)
+        print(f"[submit {label}] {task_id} (attempt {attempt + 1}/{attempts})", flush=True)
         try:
             return task_id, wait_task(task_id, timeout=timeout)
         except RuntimeError as exc:
-            if attempt < 2 and "synthesize" in str(exc):
-                print(f"[!] TTS transient — retry in30s: {exc}", flush=True)
-                time.sleep(30)
+            if attempt < attempts - 1 and "synthesize" in str(exc):
+                wait = 60 * (attempt + 1)  # 60/120/180/240s
+                print(f"[!] TTS transient — retry in {wait}s: {exc}", flush=True)
+                time.sleep(wait)
             else:
                 raise
     raise RuntimeError("submit failed")
@@ -245,8 +284,12 @@ def pop_topic() -> str:
     fresh = []
     with open(qfile, encoding="utf-8-sig") as fh:
         for row in _csv.DictReader(fh):
-            if row.get("id") not in used:
-                fresh.append(row)
+            if row.get("id") in used:
+                continue
+            title = (row.get("title") or "").lower()
+            if any(s in title for s in SENSITIVE):  # موضوعات حساس → رد (مانیتایز)
+                continue
+            fresh.append(row)
     if not fresh:
         raise RuntimeError("topics exhausted")
     row = random.choice(fresh)
