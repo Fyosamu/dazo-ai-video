@@ -76,9 +76,9 @@ jobs:
           t = re.sub(r'(?m)^gemini_model_name = .*', 'gemini_model_name = "gemini-flash-lite-latest"', t)
           # رفع خطای TTS روی رانر: تایم‌اوت edge-tts پیش‌فرض ۳۰ ثانیه برای شبکه گیت‌هاب کم است
           if re.search(r'(?m)^edge_tts_timeout = ', t):
-              t = re.sub(r'(?m)^edge_tts_timeout = .*', 'edge_tts_timeout = 120', t)
+              t = re.sub(r'(?m)^edge_tts_timeout = .*', 'edge_tts_timeout = 1200', t)
           else:
-              t += "\nedge_tts_timeout = 120\n"
+              t += "\nedge_tts_timeout = 1200\n"
           p.write_text(t, encoding="utf-8")
           PY
 
