@@ -97,7 +97,9 @@ jobs:
           HOUR=$(date -u +%-H)
           if   [ "$HOUR" -le 5 ]; then CUR=0
           elif [ "$HOUR" -le 9 ]; then CUR=1
-          else CUR=2; fi          if [ "$CUR" -ge "$CHOSEN" ]; then
+          else CUR=2;
+          fi
+          if [ "$CUR" -ge "$CHOSEN" ]; then
             echo "slot $CUR (chosen $CHOSEN) → run"
             echo "run=1" >> "$GITHUB_OUTPUT"
           else
