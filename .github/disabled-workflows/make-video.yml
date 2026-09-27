@@ -1,0 +1,273 @@
+# اتوماسیون ساخت و آپلود ویدیو روی سرور لینوکس رایگان گیت‌هاب (GitHub Actions)
+#
+# روش اجرا:
+#   1) خودکار، هر روز یک ویدیو در بازه ۹ صبح تا ۶ عصر به وقت تهران — ساعت اجرا
+#      بین سه اسلات رندوم انتخاب می‌شود (۰۹:۰۰ / ۱۳:۰۰ / ۱۷:۰۰ تهران = ۰۵/۰۹/۱۳ UTC)
+#      اگر اسلات انتخابی اجرا نشد، اسلات بعدی همان روز جایگزین می‌شود (بدون از دست رفتن روز)
+#      → موضوع تازه از بانک ۱۰هزارتایی بدون تکرار، همه‌چیز خودکار
+#   2) دستی: Actions → Run workflow → موضوع دلخواه (انگلیسی)
+#
+# خروجی هر اجرا:
+#   - آپلود خودکار در یوتیوب: ویدیوی اصلی ۱۶:۹ + شورت ۹:۱۶ (اگر Secrets اتصال موجود باشد)
+#   - فیلتر کیفیت قبل از آپلود: ویدیوی کوتاه/خراب هرگز منتشر نمی‌شود
+#   - Artifacts: ویدیو + شورت + تامنیل + همه متن‌ها + api.log هنگام خطا
+#
+# سهمیه: مخزن عمومی (Public) = دقیقه اجرا نامحدود و رایگان.
+# هر اجرا حداکثر ۶ ساعت (ساخت ۱۱-۲۰ دقیقه‌ای حدود ۲-۴ ساعت — جا دارد).
+name: make-video
+
+on:
+  workflow_dispatch:
+    inputs:
+      topic:
+        description: "Video topic (English) — خالی بگذارید تا خودکار از بانک موضوعات انتخاب شود"
+        required: false
+        type: string
+  schedule:
+    - cron: '0 5 * * *'     # 05:00 UTC = 09:00 به وقت تهران (اسلات ۰)
+    - cron: '0 9 * * *'     # 09:00 UTC = 13:00 به وقت تهران (اسلات ۱)
+    - cron: '0 13 * * *'    # 13:00 UTC = 17:00 به وقت تهران (اسلات ۲)
+
+permissions:
+  contents: write   # برای ثبت وضعیت موضوعات مصرف‌شده
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    env:
+      MPT_TOPIC: ${{ inputs.topic }}
+      GEMINI_KEY: ${{ secrets.GEMINI_KEY }}
+      PEXELS_KEY: ${{ secrets.PEXELS_KEY }}
+      YT_CLIENT_ID: ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      MPT_PROJECT_DIR: ${{ github.workspace }}
+      MPT_OUT_DIR: ${{ github.workspace }}/out
+      PYTHONUTF8: "1"
+      FFMPEG_BINARY: /usr/bin/ffmpeg
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Clone MoneyPrinterTurbo v1.3.7 + deps
+        run: |
+          git clone --depth 1 --branch v1.3.7 https://github.com/harry0703/MoneyPrinterTurbo.git mpt
+          pip install -r mpt/requirements.txt
+          pip install requests pillow google-api-python-client google-auth-oauthlib
+
+      - name: Configure keys (از GitHub Secrets — هرگز در کد نیستند)
+        run: |
+          cp mpt/config.example.toml mpt/config.toml
+          python - <<'PY'
+          import os, pathlib, re
+          p = pathlib.Path("mpt/config.toml"); t = p.read_text(encoding="utf-8")
+          t = re.sub(r'(?m)^pexels_api_keys = .*', f'pexels_api_keys = ["{os.environ["PEXELS_KEY"]}"]', t)
+          t = re.sub(r'(?m)^llm_provider = .*', 'llm_provider = "gemini"', t)
+          t = re.sub(r'(?m)^gemini_api_key = .*', f'gemini_api_key = "{os.environ["GEMINI_KEY"]}"', t)
+          t = re.sub(r'(?m)^gemini_model_name = .*', 'gemini_model_name = "gemini-flash-lite-latest"', t)
+          # رفع خطای TTS روی رانر: تایم‌اوت edge-tts پیش‌فرض ۳۰ ثانیه برای شبکه گیت‌هاب کم است
+          if re.search(r'(?m)^edge_tts_timeout = ', t):
+              t = re.sub(r'(?m)^edge_tts_timeout = .*', 'edge_tts_timeout = 1200', t)
+          else:
+              t += "\nedge_tts_timeout = 1200\n"
+          p.write_text(t, encoding="utf-8")
+          PY
+
+      - name: Slot check (فقط یک ویدیو در روز — اسلات رندوم بین ۹ صبح تا ۶ عصر تهران)
+        id: slot
+        env:
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" != "schedule" ]; then echo "run=1" >> "$GITHUB_OUTPUT"; exit 0; fi
+          mkdir -p publish; touch publish/last_upload.txt
+          TODAY=$(date -u +%F)
+          if [ "$(cat publish/last_upload.txt)" = "$TODAY" ]; then
+            echo "امروز آپلود شد — رد شد."; echo "run=0" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          CHOSEN=$(python -c "import hashlib,datetime;print(int(hashlib.sha256(datetime.date.today().toordinal().to_bytes(4,'big')).hexdigest(),16)%3)")
+          HOUR=$(date -u +%-H)
+          if   [ "$HOUR" -le 5 ]; then CUR=0
+          elif [ "$HOUR" -le 9 ]; then CUR=1
+          else CUR=2;
+          fi
+          if [ "$CUR" -ge "$CHOSEN" ]; then
+            echo "slot $CUR (chosen $CHOSEN) → run"
+            echo "run=1" >> "$GITHUB_OUTPUT"
+          else
+            echo "slot $CUR قبل از اسلات $CHOSEN — رد شد"
+            echo "run=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Patch subtitle background → 70% dark + rounded (همان کیفیت نمونه)
+        if: steps.slot.outputs.run == '1'
+        run: |
+          python - <<'PY'
+          import pathlib
+          v = pathlib.Path("mpt/app/services/video.py"); s = v.read_text(encoding="utf-8")
+          s = s.replace("alpha=140,", "alpha=178,")
+          s = s.replace("color=bg_color,\n                alpha=255,", "color=bg_color,\n                alpha=178,")
+          assert "alpha=178" in s, "patch failed"
+          v.write_text(s, encoding="utf-8")
+          print("subtitle alpha -> 178 (70%) + rounded ok")
+          PY
+
+      - name: Clear old artifacts (فضای رایگان 500MB — قدیمی‌ها قبل از آپلود جدید پاک شوند)
+        if: steps.slot.outputs.run == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/${{ github.repository }}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[].id' 2>/dev/null | xargs -r -I{} \
+            gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/{}" || true
+
+      - name: Start API server
+        if: steps.slot.outputs.run == '1'
+        run: |
+          cd mpt
+          nohup python main.py > ../api.log 2>&1 &
+          cd ..
+          for i in $(seq 1 40); do
+            sleep 3
+            if curl -sf http://127.0.0.1:8080/ping > /dev/null; then echo "API up"; break; fi
+          done
+          curl -sf http://127.0.0.1:8080/ping
+
+      - name: Generate video + thumbnail + texts (اصلی ۱۶:۹ + شورت ۹:۱۶ — خودکار)
+        if: steps.slot.outputs.run == '1'
+        run: |
+          mkdir -p out
+          cd bot
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python -u make_sample.py --daily
+          else
+            python -u make_sample.py
+          fi
+
+      - name: Quality gate (ویدیوی کوتاه/خراب آپلود نمی‌شود)
+        id: gate
+        if: steps.slot.outputs.run == '1'
+        run: |
+          ok=1
+          if [ ! -f out/sample_video.mp4 ]; then echo "ویدیوی اصلی نیست"; ok=0; fi
+          DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/sample_video.mp4 2>/dev/null || echo 0)
+          echo "مدت اصلی: ${DUR}s"
+          # اصلی باید حداقل ۹ دقیقه باشد (بلند ۱۱-۲۰ دقیقه‌ای — زیر ۹ دقیقه یعنی رندر ناقص)
+          python -c "import sys;sys.exit(0 if float('${DUR:-0}')>=540 else 1)" || { echo "کوتاه‌تر از حد نصاب"; ok=0; }
+          if [ -f out/thumbnail.jpg ]; then
+            SDUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 out/short_video.mp4 2>/dev/null || echo 0)
+            echo "مدت شورت: ${SDUR}s"
+            python -c "import sys;sys.exit(0 if float('${SDUR:-0}')>=25 else 1)" || { echo "شورت ناقص"; ok=0; }
+          fi
+          echo "pass=$ok" >> "$GITHUB_OUTPUT"
+          [ "$ok" = "1" ] && echo "کیفیت تأیید شد" || echo "::warning::فیلتر کیفیت رد کرد — آپلود انجام نمی‌شود"
+
+      - name: YouTube upload (آپلود خودکار اصلی + شورت — فقط اگر اتصال فعال باشد)
+        id: yt
+        if: steps.slot.outputs.run == '1' && steps.gate.outputs.pass == '1'
+        continue-on-error: true
+        run: |
+          if [ -z "$YT_REFRESH_TOKEN" ]; then
+            echo "اتصال یوتیوب هنوز ساخته نشده — رد شد."
+            exit 0
+          fi
+          if [ ! -f out/sample_video.mp4 ]; then
+            echo "ویدیویی ساخته نشد."
+            exit 1
+          fi
+          printf 'YT_CLIENT_ID=%s\nYT_CLIENT_SECRET=%s\nYT_REFRESH_TOKEN=%s\n' \
+            "$YT_CLIENT_ID" "$YT_CLIENT_SECRET" "$YT_REFRESH_TOKEN" > bot/yt.env
+          TITLE="$(head -n1 out/title.txt)"
+          TAGS=$(python -c "import re,pathlib;print(','.join(re.findall(r'#(\w+)',pathlib.Path('out/caption.txt').read_text(encoding='utf-8')))[:500])")
+          python -u bot/yt_upload.py out/sample_video.mp4 "$TITLE" out/description.txt "$TAGS" out/thumbnail.jpg
+          if [ -f out/short_video.mp4 ]; then
+            python -u bot/yt_upload.py out/short_video.mp4 "$TITLE #Shorts" out/description.txt "$TAGS"
+          fi
+          echo "done=1" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare artifacts (اگر آپلود شد ویدیوها حذف، وگرنه سایزشان برای فضای 500MB محدود می‌شود)
+        if: always() && steps.slot.outputs.run == '1'
+        env:
+          YT_DONE: ${{ steps.yt.outputs.done }}
+        run: |
+          python - <<'PY'
+          import os, pathlib, subprocess
+          out = pathlib.Path("out")
+          yt_ok = os.environ.get("YT_DONE") == "1"
+          CAPS = {"sample_video.mp4": 370, "short_video.mp4": 80}   # MB
+          if yt_ok:
+              for n in ("sample_video.mp4", "short_video.mp4"):
+                  (out / n).unlink(missing_ok=True)
+                  print("yt uploaded -> dropped", n)
+          for n, mb in CAPS.items():
+              p = out / n
+              if not p.exists() or p.stat().st_size <= mb * 1048576:
+                  continue
+              r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(p)], capture_output=True, text=True)
+              dur = float((r.stdout or "60").strip() or 60)
+              kbps = max(300, int(mb * 1048576 * 8 * 0.92 / dur / 1000) - 128)
+              tmp = p.with_suffix(".cap.mp4")
+              subprocess.run(["ffmpeg", "-y", "-hide_banner", "-loglevel", "error", "-i", str(p),
+                              "-c:v", "libx264", "-preset", "veryfast", "-b:v", f"{kbps}k",
+                              "-maxrate", f"{kbps}k", "-bufsize", f"{kbps*2}k",
+                              "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(tmp)], check=True)
+              tmp.replace(p)
+              print(f"capped {n} -> {p.stat().st_size / 1048576:.0f}MB")
+          PY
+
+      - name: Upload artifacts (ویدیو + شورت + تامنیل + متن‌ها)
+        if: steps.slot.outputs.run == '1'
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-${{ github.run_number }}
+          path: |
+            out/sample_video.mp4
+            out/short_video.mp4
+            out/thumbnail.jpg
+            out/title.txt
+            out/hook.txt
+            out/caption.txt
+            out/description.txt
+            out/script.txt
+          retention-days: 3
+          if-no-files-found: error
+
+      - name: Upload api.log (فقط هنگام خطا — برای عیب‌یابی)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-log-${{ github.run_number }}
+          path: api.log
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Save used topics (ضد تکرار + جلوگیری از غیرفعال شدن cron پس از 60 روز بی‌کاری)
+        if: always()
+        run: |
+          git config user.name "mpt-bot"
+          git config user.email "mpt-bot@users.noreply.github.com"
+          mkdir -p publish
+          touch publish/used_topics.txt
+          if [ "${{ steps.yt.outputs.done }}" = "1" ] || [ "${{ steps.gate.outputs.pass }}" = "1" ]; then
+            date -u +%F > publish/last_upload.txt
+          fi
+          git add -f publish/used_topics.txt publish/last_upload.txt
+          if ! git diff --cached --quiet; then
+            git commit -m "daily: mark topics used"
+            git pull --rebase origin HEAD || true
+            git push || true
+          fi
+
+      - name: نتیجه آپلود یوتیوب (اگر اتصال فعال ولی ناموفق بود، اجرا خطا دهد)
+        if: steps.yt.outcome == 'failure'
+        run: |
+          echo "آپلود یوتیوب ناموفق بود — Secrets های YT_* را بررسی کنید."
+          exit 1
