@@ -21,6 +21,14 @@ Modes:
 Config: متغیرهای محیطی، یا فایل bot.env کنار همین اسکریپت (متغیر محیطی برنده است).
 """
 
+try:
+    import netfix  # noqa: F401  DNS self-heal (dead private IP answers)
+except ImportError:  # when imported as bot.bot, bot/ is not on sys.path
+    import sys as _sys
+    import os as _os
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import netfix  # noqa: F401
+
 import argparse
 import os
 import queue
@@ -414,8 +422,24 @@ def _pick_font(size: int, candidates):
 
 
 def make_thumbnail(topic: str, text: str, dest: Path) -> Path:
-    """تامنیل: عکس مرتبط Pexels + متن کوتاه هوک (Impact) روی پس‌زمینه تیره."""
+    """تامنیل: Pinterest (عکس واقعیِ مرتبط، بدون کلید/اعتبار) + متن هوک بالای تصویر.
+
+    Pinterest اولویت اول است: عکس کاملاً دیده می‌شود (برش از وسط سوژه نمی‌خورد)
+    و متن داخل نوار بالای قاب می‌نشیند. اگر پینترست جواب نداد، مسیر قدیمی
+    (Gemini Image / Pexels) به‌صورت خودکار اجرا می‌شود.
+    """
     from PIL import Image, ImageDraw, ImageFont
+
+    #1) Pinterest — عکس مرتبط با موضوع + هوک بالای تصویر (بدون مصرف اعتبار)
+    try:
+        import pin_lib
+
+        words = re.findall(r"[A-Za-z]{4,}", topic)
+        query = " ".join(words[:12]) or "abstract art"
+        pin_lib.thumbnail(query, text, str(dest), mode="long")
+        return dest
+    except Exception as exc:
+        print(f"[thumb] pinterest skipped -> fallback: {exc}", flush=True)
 
     key = CFG["PEXELS_KEY"]
     #1) اولویت با تصویرسازی گوگل (Gemini Image) — عکس کاملاً مرتبط با موضوع
